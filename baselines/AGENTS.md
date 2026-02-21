@@ -118,6 +118,7 @@ Optional upgrade:
 - Apply color correction using colorpicker (not concatenation)  
 - Ignore scalebar as input; optionally extract scale numerically  
 - Concatenate relative, colorpicker, and scalebar images only if consistent (9 channels)  
+- If using 9-channel input, modify the first CNN layer accordingly  
 
 Backbone:
 
@@ -191,6 +192,7 @@ Split outputs:
 mu        = output[:, 0:3]
 log_sigma = output[:, 3:6]
 sigma     = softplus(log_sigma) + 1e-4  # numerically stable
+sigma     = clamp(sigma, max=10)       # prevent runaway predictions
 ```
 
 ---
@@ -380,34 +382,122 @@ Consider attention pooling and/or domain-adversarial training.
 
 ---
 
-# 17. Submission Requirements
+# 17. Submission & Inference Requirements
 
-Zip file must contain:
+⚠️ **The submitted model is NOT trained on CodaBench. It is only loaded and evaluated.**  
+All training must happen locally. The submission contains only pretrained weights and inference code.
+
+## 17.1 Zip File Contents
 
 ```
 model.py
 requirements.txt
-weights/
+weights/           # all saved model weights / checkpoints
 ```
 
-`model.py` must define:
+## 17.2 `model.py` Interface
 
 ```python
 class Model:
 
     def load(self):
+        """
+        Called once at startup.
+        Load all model weights, normalization stats, species mappings,
+        and calibration parameters from the weights/ directory.
+        """
         ...
 
     def predict(self, list_of_dicts):
+        """
+        Called once per event.
+        Input: List[dict] — one dict per specimen in the event.
+        Output: dict with Gaussian predictions for each SPEI target.
+        """
         ...
 ```
 
-`predict()` must:
+## 17.3 Input Format (what `predict()` receives)
 
-- Process each specimen  
-- Generate embeddings  
-- Aggregate to event-level  
-- Return properly formatted Gaussian predictions  
+Each dict in the list contains:
+
+| Key | Type | Description |
+|---|---|---|
+| `relative_img` | PIL.Image | Image of the beetle |
+| `colorpicker_img` | PIL.Image | Color calibration card |
+| `scalebar_img` | PIL.Image | Scalebar image |
+| `scientificName` | str | Scientific name of the beetle |
+| `domainID` | int | Anonymized NEON eco-domain ID |
+
+The list contains all specimens from a **single collection event**.
+
+## 17.4 Output Format (what `predict()` must return)
+
+```python
+{
+    "SPEI_30d": {"mu": float, "sigma": float},
+    "SPEI_1y":  {"mu": float, "sigma": float},
+    "SPEI_2y":  {"mu": float, "sigma": float},
+}
+```
+
+## 17.5 What Must Be Saved to `weights/`
+
+During local training, save everything needed for inference:
+
+- Model state dicts (e.g. `torch.save(model.state_dict(), "weights/model.pt")`)  
+- Target normalization stats (`mean_train`, `std_train` per SPEI target)  
+- Species-to-index mapping (so `scientificName` can be encoded at inference)  
+- Sigma calibration multipliers (α per target, from Section 12)  
+- If ensembling: all fold checkpoints (e.g. `weights/fold_0.pt` ... `weights/fold_4.pt`)  
+
+Example save pattern:
+
+```python
+import torch, json
+
+torch.save(model.state_dict(), "weights/model.pt")
+json.dump({
+    "species_to_idx": species_to_idx,
+    "target_means": [mean_30d, mean_1y, mean_2y],
+    "target_stds": [std_30d, std_1y, std_2y],
+    "sigma_calibration": [alpha_30d, alpha_1y, alpha_2y],
+}, open("weights/config.json", "w"))
+```
+
+## 17.6 `load()` Implementation Pattern
+
+```python
+def load(self):
+    config = json.load(open("weights/config.json"))
+    self.species_to_idx = config["species_to_idx"]
+    self.target_means = config["target_means"]
+    self.target_stds = config["target_stds"]
+    self.sigma_cal = config["sigma_calibration"]
+
+    self.model = MyNetwork(...)
+    self.model.load_state_dict(torch.load("weights/model.pt", map_location="cpu"))
+    self.model.eval()
+```
+
+## 17.7 `predict()` Implementation Pattern
+
+```python
+def predict(self, list_of_dicts):
+    # 1. Process each specimen
+    # 2. Generate embeddings
+    # 3. Aggregate to event-level (mean pooling / attention)
+    # 4. Forward pass → mu_norm, sigma_norm
+    # 5. Denormalize: mu_real = mu_norm * std + mean
+    # 6. Denormalize: sigma_real = sigma_norm * std
+    # 7. Apply calibration: sigma_real *= alpha
+    # 8. Return formatted dict
+    return {
+        "SPEI_30d": {"mu": mu_30d, "sigma": sigma_30d},
+        "SPEI_1y":  {"mu": mu_1y,  "sigma": sigma_1y},
+        "SPEI_2y":  {"mu": mu_2y,  "sigma": sigma_2y},
+    }
+```
 
 ---
 
