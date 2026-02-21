@@ -1,4 +1,4 @@
-AGENTS.txt
+AGENTS.md
 ==========
 
 Project: Multimodal Probabilistic SPEI Forecasting
