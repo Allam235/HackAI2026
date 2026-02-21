@@ -1,5 +1,5 @@
 # AGENTS.md
-#This focuses more on the images
+#This blueprint focuses less on the images
 
 ## Project: Beetles Scientific-Mood ML Challenge  
 **Organized by:** Imageomics Informatics  
@@ -57,30 +57,30 @@ Lower CRPS is better (0 is optimal).
 
 `predict()` receives:
 
-`List[dict]`
+```python
+List[dict]
+```
 
-Each dictionary corresponds to one specimen within the same sampling event.
+Each dictionary corresponds to **one specimen within the same sampling event**.
 
 Each specimen dictionary contains:
 
-```python
-relative_img       # PIL.Image of the beetle
-colorpicker_img    # PIL.Image of the color calibration card
-scalebar_img       # PIL.Image of the scalebar
-scientificName     # str, scientific name
-domainID           # int, anonymized NEON eco-domain
-```
+- `relative_img` (PIL.Image) — beetle image  
+- `colorpicker_img` (PIL.Image) — color calibration card  
+- `scalebar_img` (PIL.Image) — scale image  
+- `scientificName` (str)  
+- `domainID` (int, anonymized NEON eco-domain)
 
 Important:
 
-- There may be multiple specimens per event  
-- You must aggregate specimen-level information into a single event-level prediction  
+- There may be **multiple specimens per event**
+- You must aggregate specimen-level information into a single event-level prediction
 
 ---
 
 # 4. Modeling Strategy
 
-This is a Deep Sets problem.
+This is a **Deep Sets problem**.
 
 For each event:
 
@@ -90,9 +90,9 @@ Event = {specimen_1, specimen_2, ..., specimen_n}
 
 We compute:
 
-- Specimen-level embeddings  
-- Aggregate across specimens  
-- Produce event-level Gaussian predictions  
+1. Specimen-level embeddings  
+2. Aggregate across specimens  
+3. Produce event-level Gaussian predictions  
 
 ---
 
@@ -104,93 +104,84 @@ We compute:
 
 Baseline recommendation:
 
-- Use `relative_img` only initially  
-- Resize to 224x224  
+- Use `relative_img` only initially
+- Resize to 224x224
 - Normalize using ImageNet stats:
-
-```python
-mean = [0.485, 0.456, 0.406]
-std = [0.229, 0.224, 0.225]
-```
+  - mean = [0.485, 0.456, 0.406]
+  - std  = [0.229, 0.224, 0.225]
 
 Optional upgrade:
-
-- Apply color correction using colorpicker (not concatenation)  
-- Ignore scalebar as input; optionally extract scale numerically  
-- Concatenate relative, colorpicker, and scalebar images only if consistent (9 channels)  
+- Concatenate relative, colorpicker, and scalebar images (9 channels total)
+- Modify first CNN layer accordingly
 
 Backbone:
 
-- EfficientNet-B0 or ResNet50 (pretrained)  
-- Output embedding: 512-dim  
+- EfficientNet-B0 or ResNet50 (pretrained)
+
+Output embedding: 512-dim
 
 ---
 
 ### Metadata Encoding
 
 Scientific Name:
-
-- Map to integer index  
-- `Embedding(144, 16)`
+- Map to integer index
+- Embedding(144, 16)
 
 Domain ID:
-
-- ⚠️ Use cautiously — may harm generalization  
-- `Embedding(?, 4–6)`  
-- Small dimension recommended if used  
+- Embedding(?, 4–6)
+- Small dimension recommended (avoid overfitting to domain)
 
 Concatenate:
 
-- image_embedding (512)  
-- species_embedding (16)  
-- optional domain_embedding (4–6)  
+```
+image_embedding (512)
++ species_embedding (16)
++ domain_embedding (4–6)
+```
 
 Pass through:
 
-```python
+```
 Linear → 256
 ReLU
 ```
 
-Output: 256-dim specimen embedding  
+Output: 256-dim specimen embedding
 
 ---
 
 # 6. Event Aggregation
 
-Use permutation-invariant pooling.
+Use permutation-invariant pooling:
 
-Baseline:
+### Baseline (recommended):
 
-```python
+```
 event_embedding = mean(specimen_embeddings)
 ```
 
 Optional upgrade:
-
-- Attention pooling: weight specimens by information content  
-- Concatenate explicit event-level features:
-  - species counts  
-  - richness  
-  - diversity  
-  - specimen count  
+- Attention pooling
 
 ---
 
 # 7. Event-Level Prediction Head
 
-```python
+```
 Linear(256 → 128)
 ReLU
+
 Linear(128 → 6)
 ```
 
 Split outputs:
 
-```python
+```
 mu        = output[:, 0:3]
 log_sigma = output[:, 3:6]
-sigma     = softplus(log_sigma) + 1e-4  # numerically stable
+sigma     = exp(log_sigma)
+sigma     = clamp(sigma, min=1e-3, max=10)
 ```
 
 ---
@@ -199,19 +190,19 @@ sigma     = softplus(log_sigma) + 1e-4  # numerically stable
 
 Normalize each target separately:
 
-```python
+```
 SPEI_norm = (SPEI - mean_train) / std_train
 ```
 
 Apply independently for:
 
-- 30d  
-- 1y  
-- 2y  
+- 30d
+- 1y
+- 2y
 
 During inference:
 
-```python
+```
 μ_real = μ_norm * std + mean
 σ_real = σ_norm * std
 ```
@@ -224,14 +215,18 @@ During inference:
 
 For each target:
 
-```python
+```
 NLL = 0.5 * log(σ²) + (y - μ)² / (2σ²)
 ```
 
 Total loss:
 
-```python
-Loss = mean_batch(NLL_30d + NLL_1y + NLL_2y)
+```
+Loss = mean_batch(
+    NLL_30d +
+    NLL_1y +
+    NLL_2y
+)
 ```
 
 ---
@@ -240,7 +235,7 @@ Loss = mean_batch(NLL_30d + NLL_1y + NLL_2y)
 
 To better align with evaluation metric:
 
-```python
+```
 Loss = 0.7 * NLL + 0.3 * CRPS
 ```
 
@@ -253,19 +248,16 @@ CRPS computed using Gaussian closed-form.
 Primary metric: CRPS
 
 Leaderboard score:
-
-RMS across:
-
-- SPEI_30d  
-- SPEI_1y  
-- SPEI_2y  
-- Novel eco-domain category  
+- RMS across:
+  - SPEI_30d
+  - SPEI_1y
+  - SPEI_2y
+  - Novel eco-domain category
 
 Lower is better.
 
 Also monitor:
-
-- RMSE (sanity check only)  
+- RMSE (sanity check only)
 
 ---
 
@@ -273,17 +265,14 @@ Also monitor:
 
 Use:
 
-```python
+```
 GroupKFold(n_splits=5)
 group = domainID
 ```
 
 Purpose:
-
-- Prevent domain leakage  
-- Simulate novel eco-domain scenario  
-
-⚠️ Consider removing domain embedding entirely for final out-of-domain evaluation.
+- Prevent domain leakage
+- Simulate novel eco-domain scenario
 
 ---
 
@@ -293,7 +282,7 @@ After training:
 
 On validation set:
 
-```python
+```
 σ_30d = α1 * σ_30d
 σ_1y  = α2 * σ_1y
 σ_2y  = α3 * σ_2y
@@ -313,16 +302,16 @@ Calibration significantly improves leaderboard performance.
 
 # 13. Baselines (Mandatory)
 
-Metadata-Only Baseline
+## Metadata-Only Baseline
 
 Per event features:
 
-- Species frequency counts  
-- Species diversity (richness, Shannon)  
-- Number of specimens  
-- Domain ID (if allowed)  
+- Species frequency counts
+- Species diversity
+- Number of specimens
+- Domain ID
 
-Train Gaussian LightGBM regressors or MLPs.
+Train Gaussian LightGBM regressors.
 
 This establishes whether image features add ecological signal.
 
@@ -332,12 +321,12 @@ This establishes whether image features add ecological signal.
 
 Train:
 
-- 5-fold models  
-- Multiple random seeds  
+- 5-fold models
+- Multiple random seeds
 
 Ensemble means and variances correctly:
 
-```python
+```
 μ_ensemble = mean(μ_k)
 
 σ²_ensemble =
@@ -355,32 +344,17 @@ Final phase includes unseen eco-domain.
 
 Recommendations:
 
-- Remove or minimize domain embedding  
+- Use small domain embedding
+- Try model without domain embedding
 - Use regularization:
-  - Dropout  
-  - Weight decay  
-  - Early stopping  
-- Apply strong data augmentation:
-  - Color jitter  
-  - Random brightness  
-  - Random crops / resized crops  
-
-Avoid memorizing domain-specific drought baselines.
-
-Consider attention pooling and/or domain-adversarial training.
+  - Dropout
+  - Weight decay
+  - Early stopping
+- Avoid memorizing domain-specific drought baselines
 
 ---
 
-# 16. Image Handling Notes
-
-- Use colorpicker for white balance / histogram normalization  
-- Scalebar may be ignored unless numeric scale can be reliably extracted  
-- Background removal or approximate segmentation recommended to reduce imaging artifacts  
-- Data augmentation is critical due to inconsistent imaging  
-
----
-
-# 17. Submission Requirements
+# 16. Submission Requirements
 
 Zip file must contain:
 
@@ -404,14 +378,14 @@ class Model:
 
 `predict()` must:
 
-- Process each specimen  
-- Generate embeddings  
-- Aggregate to event-level  
-- Return properly formatted Gaussian predictions  
+1. Process each specimen
+2. Generate embeddings
+3. Aggregate to event-level
+4. Return properly formatted Gaussian predictions
 
 ---
 
-# 18. Final Objective
+# 17. Final Objective
 
 Minimize:
 
@@ -419,7 +393,7 @@ Average CRPS (RMS aggregated across categories)
 
 Primary goals:
 
-- Accurate mean (μ)  
-- Well-calibrated uncertainty (σ)  
-- Strong domain generalization  
-- Robust ensembling  
+- Accurate mean (μ)
+- Well-calibrated variance (σ)
+- Proper cross-validation
+- Robust ensembling
