@@ -393,6 +393,6 @@ Average CRPS (RMS aggregated across categories)
 Primary goals:
 
 - Accurate mean (μ)
-- Well-calibrated uncertainty (σ)
-- Strong domain generalization
+- Well-calibrated variance (σ)
+- Proper cross-validation
 - Robust ensembling
