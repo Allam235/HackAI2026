@@ -1,298 +1,398 @@
-AGENTS.md
-==========
+# AGENTS.md
 
-Project: Multimodal Probabilistic SPEI Forecasting
---------------------------------------------------
+## Project: Beetles Scientific-Mood ML Challenge  
+**Organized by:** Imageomics Informatics  
+**Platform:** CodaBench  
+**Evaluation Metric:** CRPS (RMS aggregated across categories)  
+**Prediction Type:** Event-level probabilistic forecasting  
+**Docker Image:** ytchou97/hdr-image:latest  
 
-This project predicts probabilistic distributions for:
+---
 
-- SPEI_30d
-- SPEI_1y
-- SPEI_2y
+# 1. Problem Overview
 
-Evaluation Metric: CRPS (Continuous Ranked Probability Score)
+This challenge predicts drought conditions (SPEI) using images of carabid beetle specimens collected during sampling events.
 
-The task is a multi-task probabilistic regression problem using multimodal inputs.
+This is:
 
+- An **out-of-sample domain generalization problem**
+- A **set-based prediction problem**
+- A **probabilistic regression task**
+- Evaluated using **CRPS**
+- Final ranking based on **RMS of CRPS categories**
 
-1. Problem Definition
----------------------
+Training and test eco-domains (NEON domains) are disjoint. The final phase includes a completely unseen eco-domain.
 
-Inputs per sample:
-- Beetle image
-- siteID (19 categories)
-- scientificName (144 categories)
-- collectDate
+---
 
-Outputs per sample:
-- μ_30d, σ_30d
-- μ_1y,  σ_1y
-- μ_2y,  σ_2y
+# 2. Prediction Target
 
-Total model outputs: 6 values
+For each **eventID**, predict a Gaussian distribution for:
 
+- `SPEI_30d`
+- `SPEI_1y`
+- `SPEI_2y`
 
-2. Data Preprocessing
----------------------
+Each prediction must include:
 
-2.1 Image Preprocessing
+- `mu` (mean)
+- `sigma` (standard deviation, > 0)
 
-- Resize to 224x224 (or 384x384 if larger backbone)
-- Convert to RGB
-- Normalize with ImageNet stats:
+Required output format:
 
-  mean = [0.485, 0.456, 0.406]
-  std  = [0.229, 0.224, 0.225]
+```python
+{
+    "SPEI_30d": {"mu": float, "sigma": float},
+    "SPEI_1y":  {"mu": float, "sigma": float},
+    "SPEI_2y":  {"mu": float, "sigma": float},
+}
+```
 
-Train augmentations (light only):
-- Horizontal flip
-- ±10° rotation
-- Mild brightness/contrast
+Lower CRPS is better (0 is optimal).
 
-Avoid heavy color jitter.
+---
 
+# 3. Input Interface (CodaBench Requirement)
 
-2.2 siteID Encoding
+`predict()` receives:
 
-- Map to integer [0–18]
-- Embedding(19, 6)
-- Output dimension: 6
+```python
+List[dict]
+```
 
+Each dictionary corresponds to **one specimen within the same sampling event**.
 
-2.3 scientificName Encoding
+Each specimen dictionary contains:
 
-- Map to integer [0–143]
-- Embedding(144, 16)
-- Output dimension: 16
+- `relative_img` (PIL.Image) — beetle image  
+- `colorpicker_img` (PIL.Image) — color calibration card  
+- `scalebar_img` (PIL.Image) — scale image  
+- `scientificName` (str)  
+- `domainID` (int, anonymized NEON eco-domain)
 
+Important:
 
-2.4 collectDate Encoding
+- There may be **multiple specimens per event**
+- You must aggregate specimen-level information into a single event-level prediction
 
-Extract:
-- year (normalized)
-- day-of-year (cyclical encoding)
+---
 
-sin_doy = sin(2π * doy / 365)
-cos_doy = cos(2π * doy / 365)
+# 4. Modeling Strategy
 
-Final date vector: 3 values
+This is a **Deep Sets problem**.
 
-Pass through MLP:
-  Linear(3 → 16)
-  ReLU
+For each event:
 
-Output: 16-dim
+```
+Event = {specimen_1, specimen_2, ..., specimen_n}
+```
 
+We compute:
 
-3. Model Architecture
----------------------
+1. Specimen-level embeddings  
+2. Aggregate across specimens  
+3. Produce event-level Gaussian predictions  
 
-3.1 Image Branch
+---
 
-Backbone: EfficientNet-B0 or ResNet50 (pretrained)
+# 5. Model Architecture
+
+## 5.1 Specimen Encoder
+
+### Image Processing
+
+Baseline recommendation:
+
+- Use `relative_img` only initially
+- Resize to 224x224
+- Normalize using ImageNet stats:
+  - mean = [0.485, 0.456, 0.406]
+  - std  = [0.229, 0.224, 0.225]
+
+Optional upgrade:
+- Concatenate relative, colorpicker, and scalebar images (9 channels total)
+- Modify first CNN layer accordingly
+
+Backbone:
+
+- EfficientNet-B0 or ResNet50 (pretrained)
 
 Output embedding: 512-dim
-If backbone larger, reduce with:
-  Linear(1280 → 512)
-  ReLU
 
+---
 
-3.2 Metadata Branch
+### Metadata Encoding
 
-Inputs:
-- Site embedding (6)
-- Species embedding (16)
-- Date MLP output (16)
+Scientific Name:
+- Map to integer index
+- Embedding(144, 16)
 
-Concatenate → 38-dim
-
-Metadata MLP:
-  Linear(38 → 64)
-  ReLU
-  Dropout(0.1)
-  Linear(64 → 64)
-  ReLU
-
-Output: 64-dim
-
-
-3.3 Fusion
+Domain ID:
+- Embedding(?, 4–6)
+- Small dimension recommended (avoid overfitting to domain)
 
 Concatenate:
-- Image: 512
-- Metadata: 64
 
-Total: 576-dim
+```
+image_embedding (512)
++ species_embedding (16)
++ domain_embedding (4–6)
+```
 
+Pass through:
 
-3.4 Prediction Head
+```
+Linear → 256
+ReLU
+```
 
-  Linear(576 → 256)
-  ReLU
-  Dropout(0.2)
+Output: 256-dim specimen embedding
 
-  Linear(256 → 128)
-  ReLU
+---
 
-  Linear(128 → 6)
+# 6. Event Aggregation
+
+Use permutation-invariant pooling:
+
+### Baseline (recommended):
+
+```
+event_embedding = mean(specimen_embeddings)
+```
+
+Optional upgrade:
+- Attention pooling
+
+---
+
+# 7. Event-Level Prediction Head
+
+```
+Linear(256 → 128)
+ReLU
+
+Linear(128 → 6)
+```
 
 Split outputs:
-  mu        = output[:, 0:3]
-  log_sigma = output[:, 3:6]
-  sigma     = exp(log_sigma)
-  sigma     = clamp(sigma, min=1e-3, max=10)
 
+```
+mu        = output[:, 0:3]
+log_sigma = output[:, 3:6]
+sigma     = exp(log_sigma)
+sigma     = clamp(sigma, min=1e-3, max=10)
+```
 
-4. Target Normalization
------------------------
+---
+
+# 8. Target Normalization
 
 Normalize each target separately:
 
-  SPEI_norm = (SPEI - mean_train) / std_train
+```
+SPEI_norm = (SPEI - mean_train) / std_train
+```
 
-Do this for:
+Apply independently for:
+
 - 30d
 - 1y
 - 2y
 
 During inference:
-  μ_real = μ_norm * std + mean
-  σ_real = σ_norm * std
 
+```
+μ_real = μ_norm * std + mean
+σ_real = σ_norm * std
+```
 
-5. Loss Function
-----------------
+---
 
-5.1 Gaussian Negative Log Likelihood
+# 9. Loss Function
+
+## 9.1 Gaussian Negative Log Likelihood (Primary)
 
 For each target:
 
-  NLL = 0.5 * log(σ²) + (y - μ)² / (2σ²)
+```
+NLL = 0.5 * log(σ²) + (y - μ)² / (2σ²)
+```
 
 Total loss:
-  Loss = mean_batch(
-      NLL_30d +
-      NLL_1y +
-      NLL_2y
-  )
 
+```
+Loss = mean_batch(
+    NLL_30d +
+    NLL_1y +
+    NLL_2y
+)
+```
 
-5.2 Optional Hybrid Loss (Recommended)
+---
 
-  Loss = 0.7 * NLL + 0.3 * CRPS
+## 9.2 Optional Hybrid Loss
 
+To better align with evaluation metric:
 
-6. Evaluation
--------------
+```
+Loss = 0.7 * NLL + 0.3 * CRPS
+```
+
+CRPS computed using Gaussian closed-form.
+
+---
+
+# 10. Evaluation
 
 Primary metric: CRPS
 
-Track:
-- CRPS_30d
-- CRPS_1y
-- CRPS_2y
-- Average CRPS
+Leaderboard score:
+- RMS across:
+  - SPEI_30d
+  - SPEI_1y
+  - SPEI_2y
+  - Novel eco-domain category
 
-Also compute RMSE for sanity.
+Lower is better.
 
+Also monitor:
+- RMSE (sanity check only)
 
-7. Cross-Validation
--------------------
+---
 
-Use GroupKFold(n_splits=5)
-Group variable: siteID
+# 11. Cross-Validation Strategy
 
-Prevents:
-- Site memorization
-- Climate leakage
+Use:
 
+```
+GroupKFold(n_splits=5)
+group = domainID
+```
 
-8. Sigma Calibration (Important)
---------------------------------
+Purpose:
+- Prevent domain leakage
+- Simulate novel eco-domain scenario
+
+---
+
+# 12. Sigma Calibration (Critical)
+
+After training:
 
 On validation set:
 
-  σ_30d = α1 * σ_30d
-  σ_1y  = α2 * σ_1y
-  σ_2y  = α3 * σ_2y
+```
+σ_30d = α1 * σ_30d
+σ_1y  = α2 * σ_1y
+σ_2y  = α3 * σ_2y
+```
 
-Search α ∈ [0.7, 1.5]
-Select α minimizing CRPS.
+Search:
 
+```
+α ∈ [0.7, 1.5]
+```
 
-9. Baseline Model
------------------
+Choose α minimizing CRPS.
 
-Metadata-only LightGBM
+Calibration significantly improves leaderboard performance.
 
-Features:
-- siteID
-- scientificName
-- sin_doy
-- cos_doy
-- year
+---
 
-Train 3 Gaussian regressors (mean + variance).
+# 13. Baselines (Mandatory)
 
-Establish baseline before multimodal model.
+## Metadata-Only Baseline
 
+Per event features:
 
-10. Ensembling
---------------
+- Species frequency counts
+- Species diversity
+- Number of specimens
+- Domain ID
+
+Train Gaussian LightGBM regressors.
+
+This establishes whether image features add ecological signal.
+
+---
+
+# 14. Ensembling
 
 Train:
+
 - 5-fold models
-- Multiple seeds
+- Multiple random seeds
 
-Ensemble:
+Ensemble means and variances correctly:
 
-  μ_ensemble = mean(μ_k)
+```
+μ_ensemble = mean(μ_k)
 
-  σ²_ensemble =
-      mean(σ_k² + μ_k²)
-      - μ_ensemble²
+σ²_ensemble =
+    mean(σ_k² + μ_k²)
+    - μ_ensemble²
+```
 
 Do NOT average σ directly.
 
+---
 
-11. Model Variants
-------------------
+# 15. Domain Generalization Considerations
 
-Evaluate:
-- Single multi-task model
-- Three independent models (one per target)
+Final phase includes unseen eco-domain.
 
+Recommendations:
 
-12. Expected Difficulty
------------------------
+- Use small domain embedding
+- Try model without domain embedding
+- Use regularization:
+  - Dropout
+  - Weight decay
+  - Early stopping
+- Avoid memorizing domain-specific drought baselines
 
-SPEI_30d  → Hardest
-SPEI_1y   → Medium
-SPEI_2y   → Easiest
+---
 
+# 16. Submission Requirements
 
-13. Training Best Practices
----------------------------
+Zip file must contain:
 
-- Mixed precision (AMP)
-- Early stopping on validation CRPS
-- Cosine or OneCycle LR schedule
-- Weight decay: 1e-4
-- Maximize GPU batch size
+```
+model.py
+requirements.txt
+weights/
+```
 
+`model.py` must define:
 
-14. Final Objective
--------------------
+```python
+class Model:
+
+    def load(self):
+        ...
+
+    def predict(self, list_of_dicts):
+        ...
+```
+
+`predict()` must:
+
+1. Process each specimen
+2. Generate embeddings
+3. Aggregate to event-level
+4. Return properly formatted Gaussian predictions
+
+---
+
+# 17. Final Objective
 
 Minimize:
 
-Average CRPS across:
-- SPEI_30d
-- SPEI_1y
-- SPEI_2y
+Average CRPS (RMS aggregated across categories)
 
 Primary goals:
+
 - Accurate mean (μ)
-- Well-calibrated variance (σ)
-- Proper cross-validation
+- Well-calibrated uncertainty (σ)
+- Strong domain generalization
 - Robust ensembling
