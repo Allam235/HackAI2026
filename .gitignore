@@ -165,3 +165,8 @@ cython_debug/
 
 # Mac system
 .DS_Store
+
+#The embedding files are too large to be included in the repository
+baselines/train_embeddings.pt
+baselines/validation_embeddings.pt
+
